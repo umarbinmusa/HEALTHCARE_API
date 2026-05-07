@@ -36,6 +36,10 @@ const resolvers = {
       }
       return await models.User.find();
     },
+    getUsersByRole: async (_, { role }, { user }) => {
+  // Optional: requireRole(user, ["PATIENT", "ADMIN"]);
+  return await User.find({ role: role });
+},
    getDrugs: async () => {
   const drugs = await Drug.find().sort({ createdAt: -1 }).populate("createdBy");
   
@@ -266,65 +270,52 @@ consultantAppointments: async (_, __, { user }) => {
       return { token, user };
     },
     
-       createConsultation: async (
-      _,
-      { patientId, symptoms, diagnosis, prescription, followUpDate },
-      { user }
-    ) => {
-      //  Ensure user has role
-      requireRole(user, ["ADMIN", "CONSULTANT"]);
+  createConsultation: async (
+  _,
+  { patientName, symptoms, diagnosis, prescription, followUpDate },
+  { user }
+) => {
+  // 1. Authorization
+  requireRole(user, ["ADMIN", "CONSULTANT"]);
 
-      console.log("createConsultation called by:", user.full_name, user.role);
-      console.log("patientId:", patientId);
+  // 2. Build Query
+  let query = { 
+    full_name: { $regex: new RegExp(`^${patientName}$`, 'i') }, 
+    role: "PATIENT" 
+  };
 
-      //  Validate patientId
-      if (!mongoose.Types.ObjectId.isValid(patientId)) {
-        throw new Error("Invalid patient ID");
-      }
+  // 3. Handle Consultant Restrictions
+  // Note: Ensure CONSULTANT_RESTRICTED is imported or defined in this scope
+  if (user.role === "CONSULTANT" && typeof CONSULTANT_RESTRICTED !== 'undefined' && CONSULTANT_RESTRICTED) {
+    query.createdBy = user.id;
+  }
 
-      //  Find patient in User collection
-      let patient;
+  // 4. Find Patient
+  const patient = await User.findOne(query);
 
-      if (user.role === "ADMIN") {
-        // Admin can access any patient
-        patient = await User.findOne({ _id: patientId, role: "PATIENT" });
-      } else if (user.role === "CONSULTANT") {
-        if (CONSULTANT_RESTRICTED) {
-          // Only patients this consultant created
-          patient = await User.findOne({
-            _id: patientId,
-            role: "PATIENT",
-            createdBy: user.id
-          });
-        } else {
-          // Can access any patient
-          patient = await User.findOne({ _id: patientId, role: "PATIENT" });
-        }
-      }
+  if (!patient) {
+    throw new Error(`Patient "${patientName}" not found. Check spelling or verify they are registered.`);
+  }
 
-      if (!patient) {
-        console.log("Patient not found for ID:", patientId);
-        throw new Error("Patient not found");
-      }
+  // 5. Save Consultation
+  const consultation = new Consultation({
+    patient: patient._id,
+    consultant: user.id,
+    symptoms,
+    diagnosis,
+    prescription, // This will be the array of objects from your PrescriptionInput
+    followUpDate
+  });
 
-      //  Create consultation
-      const consultation = new Consultation({
-        patient: patient._id,
-        consultant: user.id,
-        symptoms,
-        diagnosis,
-        prescription,
-        followUpDate
-      });
+  await consultation.save();
 
-      await consultation.save();
-
-      
-      await consultation.populate("patient", "full_name email role");
-      await consultation.populate("consultant", "full_name role");
-
-      return consultation;
-    },
+  // 6. Return Populated Data
+  return await consultation
+    .populate([
+      { path: "patient", select: "full_name email role" },
+      { path: "consultant", select: "full_name role" }
+    ]);
+},
      createDrug: async (_, { input }, { user }) => {
       
       requireRole(user, ["ADMIN"]);
@@ -415,31 +406,44 @@ consultantAppointments: async (_, __, { user }) => {
     createAppointment: async (_, { input }, { user }) => {
   requireRole(user, ["PATIENT"]);
 
-  const { consultantId, reason, appointmentDate } = input;
+  // We now expect 'consultantName' instead of 'consultantId'
+  const { consultantName, reason, appointmentDate } = input;
 
   if (!appointmentDate) {
     throw new Error("Appointment date is required");
   }
 
-  let parsedDate;
+  // --- 1. Find Consultant by Name ---
+  let consultantId = null;
+  
+  if (consultantName) {
+    const consultant = await User.findOne({
+      full_name: { $regex: new RegExp(`^${consultantName}$`, 'i') },
+      role: "CONSULTANT"
+    });
 
-  // ✅ Case 1: timestamp string or number (e.g. "1766188800000")
+    if (!consultant) {
+      throw new Error(`Consultant "${consultantName}" not found.`);
+    }
+    consultantId = consultant.id;
+  }
+
+  // --- 2. Date Parsing ---
+  let parsedDate;
   if (/^\d+$/.test(String(appointmentDate))) {
     parsedDate = new Date(Number(appointmentDate));
-  }
-  // ✅ Case 2: ISO / normal date string (e.g. "2025-12-20")
-  else {
+  } else {
     parsedDate = new Date(appointmentDate);
   }
 
-  // ❌ Invalid date check
   if (isNaN(parsedDate.getTime())) {
     throw new Error("Invalid appointment date format");
   }
 
+  // --- 3. Save Appointment ---
   const appointment = new Appointment({
     patient: user.id,
-    consultant: consultantId || null, // admin can assign later
+    consultant: consultantId, 
     reason,
     appointmentDate: parsedDate,
     status: "PENDING"
@@ -447,10 +451,10 @@ consultantAppointments: async (_, __, { user }) => {
 
   await appointment.save();
 
-  return appointment.populate(
-    "patient consultant",
-    "full_name email role"
-  );
+  return appointment.populate([
+    { path: "patient", select: "full_name email role" },
+    { path: "consultant", select: "full_name email role" }
+  ]);
 },
 
 

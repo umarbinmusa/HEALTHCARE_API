@@ -56,6 +56,7 @@ export default gql`
     followUpDate: String
     createdAt: String
   }
+
   type Appointment {
   id: ID!
   patient: User!
@@ -72,7 +73,7 @@ export default gql`
 }
 
 input CreateAppointmentInput {
-  consultantId: ID!
+  consultantName: String   
   reason: String!
   appointmentDate: String!
 }
@@ -149,6 +150,7 @@ input CreateAppointmentInput {
    pendingAppointments: [Appointment!]!
    allAppointments: [Appointment]
    consultantAppointments: [Appointment]
+   getUsersByRole(role: String!): [User]
   }
 
   type Mutation {
@@ -165,11 +167,8 @@ input CreateAppointmentInput {
     approveAndAssignAppointment(
     input: ApproveAndAssignAppointmentInput!
   ): Appointment!
-
-
-
-    createConsultation(
-      patientId: ID!
+createConsultation(
+      patientName: String!        
       symptoms: String!
       diagnosis: String!
       prescription: [PrescriptionInput]
