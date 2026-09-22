@@ -1,15 +1,39 @@
-import mongoose from 'mongoose';
-import User from './user';
-import Test from './test';
-import Production from './production';
-import Drug from './drug';
-import Branch from './branch';
-import Patient from './patient';
-import Order from './order';Drug
-import DrugPurchase from './drugPurchase'; 
-import Consultation from './consultation';
-import Appointment from './appointment';
+import User from './user.js';
+import Production from './production.js';
+import Drug from './drug.js';
+import Branch from './branch.js';
+import Patient from './patient.js';
+import Order from './order.js';
+import OrderItem from './orderitem.js';
+import DrugPurchase from './drugPurchase.js';
+import Consultation from './consultation.js';
+import Appointment from './appointment.js';
+import OutpatientRecord from './outpatientRecord.js';
+import Freelancer from './freelancer.js';
+import FreelanceBooking from './freelanceBooking.js';
+import FreelanceJob from './freelanceJob.js';
+import JobApplication from './jobApplication.js';
+import LabTest from './labTest.js';
+import LabOrder from './labOrder.js';
 
-const models = { User, Test, Production, Drug, Branch, Patient, Order ,DrugPurchase, Consultation, Appointment }; 
+const models = {
+  User,
+  Production,
+  Drug,
+  Branch,
+  Patient,
+  Order,
+  OrderItem,
+  DrugPurchase,
+  Consultation,
+  Appointment,
+  OutpatientRecord,
+  Freelancer,
+  FreelanceBooking,
+  FreelanceJob,
+  JobApplication,
+  LabTest,
+  LabOrder
+};
 
 export default models;

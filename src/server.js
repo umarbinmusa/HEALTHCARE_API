@@ -4,7 +4,6 @@ import mongoose from 'mongoose';
 import resolvers from './graphql/resolvers/index.js';
 import typeDefs from './graphql/schema/index.js';
 import User from './models/user.js'; 
-import Test from './models/test.js'
 import Production from './models/production.js';
 import Drug from './models/drug.js';
 import Order from './models/order.js';
@@ -13,6 +12,12 @@ import Patient from './models/patient.js';
 import Drugpurchase from './models/drugPurchase.js';
 import Consultation from './models/consultation.js';
 import Appointment from './models/appointment.js';
+import Orderitem from './models/orderitem.js';
+import Freelancer from './models/freelancer.js';
+import FreelanceBooking from './models/freelanceBooking.js';
+import FreelanceJob from './models/freelanceJob.js';
+import JobApplication from './models/jobApplication.js';
+import OutpatientRecord from './models/outpatientRecord.js';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import jwt from "jsonwebtoken";
@@ -84,7 +89,11 @@ const server = new ApolloServer({
   
     
     return {
-      models: { User, Test, Production, Drug, Branch, Order, Patient, Drugpurchase, Consultation, Appointment  }, // Pass models here
+      models: {
+        User, Production, Drug, Branch, Order, Patient, Drugpurchase, Orderitem,
+        Consultation, Appointment, Freelancer, FreelanceBooking, FreelanceJob,
+        JobApplication, OutpatientRecord
+      }, // Pass models here
       user,// If using authentication middleware
     };
   }

@@ -3,6 +3,7 @@ import { GraphQLDateTime } from "graphql-scalars";
 import jwt from "jsonwebtoken";
 import mongoose, { model } from "mongoose";
 import dotenv from "dotenv";
+import { v4 as uuidv4 } from "uuid";
 import { requireRole } from "../../utils/requireRole.js";
 
 import { AuthenticationError, ForbiddenError } from "apollo-server-express";
@@ -11,11 +12,16 @@ import Consultation from "../../models/consultation.js";
 import Drug from "../../models/drug.js";
 import DrugPurchase from "../../models/drugPurchase.js";
 import Appointment from "../../models/appointment.js";
+import Order from "../../models/order.js";
+import Freelancer from "../../models/freelancer.js";
+import FreelanceBooking from "../../models/freelanceBooking.js";
+import FreelanceJob from "../../models/freelanceJob.js";
+import JobApplication from "../../models/jobApplication.js";
+import OutpatientRecord from "../../models/outpatientRecord.js";
+import LabTest from "../../models/labTest.js";
+import LabOrder from "../../models/labOrder.js";
 
 const CONSULTANT_RESTRICTED = false; 
-
-
-
 
 dotenv.config();
 
@@ -29,6 +35,17 @@ const resolvers = {
   }
 },
 
+  OutpatientRecord: {
+    patientName: (parent) => parent.patient?.full_name || null,
+    consultantName: (parent) => parent.consultant?.full_name || null,
+  },
+
+  LabOrder: {
+    patientName: (parent) => parent.patient?.full_name || null,
+    orderedByName: (parent) => parent.orderedBy?.full_name || null,
+    processedByName: (parent) => parent.processedBy?.full_name || null,
+  },
+
   Query: {
     getUsers: async (_, __, { models, user }) => {
       if (!user || user.role !== "ADMIN") {
@@ -40,10 +57,10 @@ const resolvers = {
   // Optional: requireRole(user, ["PATIENT", "ADMIN"]);
   return await User.find({ role: role });
 },
-   getDrugs: async () => {
+  getDrugs: async () => {
   const drugs = await Drug.find().sort({ createdAt: -1 }).populate("createdBy");
   
-  // Map each drug to convert IDs to string
+  // Map each drug to convert IDs to string and include reorderLevel
   return drugs.map(drug => ({
     id: drug._id.toString(),
     name: drug.name,
@@ -51,6 +68,7 @@ const resolvers = {
     description: drug.description,
     price: drug.price,
     stock: drug.stock,
+    reorderLevel: drug.reorderLevel || 0, // <-- ADD THIS LINE (with a safe fallback)
     createdBy: drug.createdBy
       ? {
           id: drug.createdBy._id.toString(),
@@ -74,22 +92,14 @@ const resolvers = {
       return await Consultation.find({
         patient: user.id
       })
-        .populate("consultant")
+        .populate("patient", "full_name email role")
+        .populate("consultant", "full_name role")
         .sort({ createdAt: -1 });
     },
    getConsultations: async (_, __, { models }) => {
       return await models.Consultation.find().sort({ createdAt: -1 });
     },
-    
 
-  myConsultations: async (_, __, { user }) => {
-    requireRole(user, ["CONSULTANT"]);
-
-    return await Consultation.find({ consultant: user.id })
-      .populate("patient", "full_name email")
-      .populate("consultant", "full_name role")
-      .sort({ createdAt: -1 });
-  },
    getConsultantAppointments: async (_, __, { user }) => {
       requireRole(user, ["CONSULTANT"]);
 
@@ -139,6 +149,13 @@ const resolvers = {
     throw new AuthenticationError("Access denied");
   }
 },
+lowStockDrugs: async (_, __, { models }) => {
+  const drugs = await models.Drug.find();
+
+  return drugs.filter(
+    (drug) => drug.stock <= drug.reorderLevel
+  );
+},
 
 
 
@@ -154,31 +171,65 @@ const resolvers = {
     },
 
     // 🔹 SINGLE RECEIPT
-    drugPurchaseReceipt: async (_, { id }, { user }) => {
+    // 🔹 SINGLE RECEIPT
+    drugPurchaseReceipt: async (_, { id }, { models, user }) => {
       if (!user) throw new Error("Unauthorized");
 
-      const purchase = await DrugPurchase.findById(id)
-        .populate("drug", "name price");
+      // Fetch from Order collection and populate everything
+      const order = await models.Order.findById(id)
+        .populate("patient")
+        .populate("items.drug");
 
-      if (!purchase) throw new Error("Receipt not found");
+      if (!order) throw new Error("Receipt not found");
 
-      if (purchase.user.toString() !== user.id) {
+      // Authorization guard
+      if (order.patient._id.toString() !== user.id) {
         throw new Error("Access denied");
       }
 
-      return purchase;
+      // Extract the first item safely for your current GraphQL schema mapping
+      const firstItem = order.items[0];
+
+      return {
+        id: order._id.toString(),
+        createdAt: order.createdAt,
+        totalPrice: order.totalAmount,
+        quantity: firstItem ? firstItem.quantity : 0,
+        unitPrice: firstItem ? firstItem.unitPrice : 0,
+        // CRITICAL SAFETY CHECK: If the drug document was deleted, provide a fallback object 
+        // so GraphQL doesn't panic with a "cannot return null for non-nullable field" error
+        drug: firstItem && firstItem.drug ? firstItem.drug : {
+          id: "deleted",
+          name: "Discontinued Medication",
+          price: 0,
+          stock: 0,
+          category: "Unknown"
+        }
+      };
     },
-    
-  // ================= PATIENT =================
-  myConsultations: async (_, __, { user }) => {
-    requireRole(user, ["PATIENT"]);
+    // 🔹 MULTI-DRUG RECEIPT RESOLVER
+    orderReceipt: async (_, { id }, { models, user }) => {
+      if (!user) {
+        throw new Error("Unauthorized");
+      }
 
-    return await Consultation.find({ patient: user.id })
-      .populate("patient", "full_name email role")
-      .populate("consultant", "full_name role")
-      .sort({ createdAt: -1 });
-  },
+      // Fetch the order and deeply hydrate patient and items.drug paths
+      const order = await models.Order.findById(id)
+        .populate("patient")
+        .populate("dispensedBy")
+        .populate("items.drug");
 
+      if (!order) {
+        throw new Error("Receipt not found");
+      }
+
+      // Authorization check
+      if (order.patient._id.toString() !== user.id && user.role !== "ADMIN") {
+        throw new Error("Access denied");
+      }
+
+      return order;
+    },
   // ================= CONSULTANT =================
   consultationsForConsultant: async (_, __, { user }) => {
     requireRole(user, ["CONSULTANT"]);
@@ -223,9 +274,160 @@ consultantAppointments: async (_, __, { user }) => {
     .populate("consultant", "full_name email")
     .sort({ appointmentDate: 1 });
 },
+myOrders: async (_, __, { models, user }) => {
+      if (!user) {
+        throw new Error("Unauthorized");
+      }
 
+      // Deeply populate both the patient and the drug inside the nested items array
+      const orders = await models.Order.find({
+        patient: user.id,
+      })
+      .populate("patient")
+      .populate("dispensedBy")
+      .populate("items.drug"); // <-- THIS IS THE CRITICAL MISSING POPULATION
 
+      return orders || [];
+    },
 
+    getAllOrders: async (_, __, { models, user }) => {
+      requireRole(user, ["ADMIN", "PHARMACY"]);
+
+      return await models.Order.find()
+        .populate("patient")
+        .populate("dispensedBy")
+        .populate("items.drug")
+        .sort({ createdAt: -1 });
+    },
+
+    // 🔹 ADMIN ONLY: Get Total Drug Sales For Today
+    getDailySalesSummary: async (_, __, { models, user }) => {
+      // 1. Enforce strict Admin-only check
+      if (!user || user.role !== "ADMIN") {
+        throw new ForbiddenError("Access denied. Admins only.");
+      }
+
+      // 2. Compute the start of today (00:00:00.000 local time)
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+
+      // 3. Run Aggregation pipeline on the Order collection
+      const salesData = await models.Order.aggregate([
+        {
+          // Filter records created today
+          $match: {
+            createdAt: { $gte: startOfToday }
+          }
+        },
+        {
+          // Unwind the items array to inspect individual drug quantities
+          $unwind: "$items"
+        },
+        {
+          // Sum totalAmount from orders and item quantities
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: "$totalAmount" },
+            totalDrugsSold: { $sum: "$items.quantity" }
+          }
+        }
+      ]);
+
+      // 4. Return summary values (or zeros if no sales occurred yet)
+      const summary = salesData[0] || { totalRevenue: 0, totalDrugsSold: 0 };
+
+      return {
+        totalRevenue: summary.totalRevenue,
+        totalDrugsSold: summary.totalDrugsSold,
+        date: new Date().toLocaleDateString()
+      };
+    },
+    getFreelancers: async () => {
+  return await Freelancer.find()
+    .populate("user");
+},
+
+    getFreelancersByType: async (_, { type }) => {
+      return await Freelancer.find({ type }).populate("user");
+    },
+
+    getFreelanceJobs: async () => {
+      return await FreelanceJob.find()
+        .populate("employer", "full_name email role")
+        .sort({ createdAt: -1 });
+    },
+
+    myFreelanceBookings: async (_, __, { user }) => {
+      if (!user) throw new Error("Authentication required");
+
+      return await FreelanceBooking.find({ patient: user.id })
+        .populate({ path: "freelancer", populate: { path: "user" } })
+        .sort({ createdAt: -1 });
+    },
+
+    getAllOutpatientRecords: async (_, __, { user }) => {
+      requireRole(user, ["ADMIN"]);
+
+      return await OutpatientRecord.find()
+        .populate("patient", "full_name email")
+        .populate("consultant", "full_name email")
+        .populate("prescriptions.drug")
+        .sort({ createdAt: -1 });
+    },
+
+    myOutpatientRecords: async (_, __, { user }) => {
+      requireRole(user, ["CONSULTANT"]);
+
+      return await OutpatientRecord.find({ consultant: user.id })
+        .populate("patient", "full_name email")
+        .populate("consultant", "full_name email")
+        .populate("prescriptions.drug")
+        .sort({ createdAt: -1 });
+    },
+
+    getLabTests: async () => {
+      return await LabTest.find().sort({ name: 1 });
+    },
+
+    getPendingLabOrders: async (_, __, { user }) => {
+      requireRole(user, ["LAB", "ADMIN"]);
+
+      return await LabOrder.find({ status: { $in: ["PENDING", "IN_PROGRESS"] } })
+        .populate("patient", "full_name email")
+        .populate("orderedBy", "full_name email role")
+        .populate("processedBy", "full_name email")
+        .sort({ createdAt: 1 });
+    },
+
+    myLabOrders: async (_, __, { user }) => {
+      requireRole(user, ["PATIENT"]);
+
+      return await LabOrder.find({ patient: user.id })
+        .populate("patient", "full_name email")
+        .populate("orderedBy", "full_name email role")
+        .populate("processedBy", "full_name email")
+        .sort({ createdAt: -1 });
+    },
+
+    labOrdersForConsultant: async (_, __, { user }) => {
+      requireRole(user, ["CONSULTANT"]);
+
+      return await LabOrder.find({ orderedBy: user.id })
+        .populate("patient", "full_name email")
+        .populate("orderedBy", "full_name email role")
+        .populate("processedBy", "full_name email")
+        .sort({ createdAt: -1 });
+    },
+
+    getAllLabOrders: async (_, __, { user }) => {
+      requireRole(user, ["ADMIN"]);
+
+      return await LabOrder.find()
+        .populate("patient", "full_name email")
+        .populate("orderedBy", "full_name email role")
+        .populate("processedBy", "full_name email")
+        .sort({ createdAt: -1 });
+    },
 
 
 
@@ -317,90 +519,110 @@ consultantAppointments: async (_, __, { user }) => {
     ]);
 },
      createDrug: async (_, { input }, { user }) => {
-      
-      requireRole(user, ["ADMIN"]);
+  requireRole(user, ["ADMIN", "PHARMACY"]);
 
-      const { name, category, description, price, stock } = input;
+  // Destructure reorderLevel from input
+  const { name, category, description, price, stock, reorderLevel } = input;
 
-      
-      if (price < 0) {
-        throw new Error("Price cannot be negative");
-      }
+  if (price < 0) {
+    throw new Error("Price cannot be negative");
+  }
 
-      if (stock < 0) {
-        throw new Error("Stock cannot be negative");
-      }
+  if (stock < 0) {
+    throw new Error("Stock cannot be negative");
+  }
 
-   
-      const drug = new Drug({
-        name,
-        category,
-        description,
-        price,
-        stock,
-        createdBy: user.id
-      });
+  // Add validation rule for reorder level
+  if (reorderLevel !== undefined && reorderLevel < 0) {
+    throw new Error("Reorder level cannot be negative");
+  }
 
-      await drug.save();
+  const drug = new Drug({
+    name,
+    category,
+    description,
+    price,
+    stock,
+    reorderLevel: reorderLevel || 0, // <-- ADD THIS LINE
+    createdBy: user.id
+  });
 
-   
-      await drug.populate("createdBy", "full_name role");
+  await drug.save();
 
-      return drug;
-    },
-    buyDrug: async (_, { input }, { user }) => {
-      // 1️⃣ Only PATIENT can buy drugs
-      requireRole(user, ["PATIENT"]);
+  await drug.populate("createdBy", "full_name role");
 
-      const { drugId, quantity } = input;
+  return drug;
+},
+restockDrug: async (_, { id, quantity }, { user }) => {
+      requireRole(user, ["ADMIN", "PHARMACY"]);
 
-      // 2️⃣ Validate inputs
-      if (!mongoose.Types.ObjectId.isValid(drugId)) {
-        throw new Error("Invalid drug ID");
-      }
+      // { new: true } is critical—it tells Mongoose to return the UPDATED document, not the old one
+      const updatedDrug = await Drug.findByIdAndUpdate(
+        id,
+        { $inc: { stock: quantity } },
+        { new: true } 
+      );
 
-      if (quantity <= 0) {
-        throw new Error("Quantity must be greater than zero");
-      }
-
-      // 3️⃣ Find drug
-      const drug = await Drug.findById(drugId);
-
-      if (!drug) {
+      if (!updatedDrug) {
         throw new Error("Drug not found");
       }
 
-      // 4️⃣ Check stock
-      if (drug.stock < quantity) {
-        throw new Error("Insufficient stock");
+      return updatedDrug; // 👈 Make sure this is returned!
+    },
+  
+   
+  checkoutDrugs: async (_, { patientId, items }, { models, user }) => {
+    requireRole(user, ["PHARMACY", "ADMIN"]);
+
+    const patient = await models.User.findOne({ _id: patientId, role: "PATIENT" });
+    if (!patient) {
+      throw new Error("Patient not found");
+    }
+
+    let totalAmount = 0;
+    const orderItems = [];
+
+    for (const item of items) {
+      const drug = await models.Drug.findById(item.drugId);
+
+      if (!drug) {
+        throw new Error(`Drug not found: ${item.drugId}`);
       }
 
-      // 5️⃣ Calculate prices
+      if (drug.stock < item.quantity) {
+        throw new Error(
+          `${drug.name} has only ${drug.stock} units remaining`
+        );
+      }
+
       const unitPrice = drug.price;
-      const totalPrice = unitPrice * quantity;
+      const totalPrice = unitPrice * item.quantity;
 
-     
-      drug.stock -= quantity;
-      await drug.save();
+      totalAmount += totalPrice;
 
-    
-      const purchase = new DrugPurchase({
-        user: user.id,
+      orderItems.push({
         drug: drug._id,
-        quantity,
+        quantity: item.quantity,
         unitPrice,
         totalPrice
       });
 
-      await purchase.save();
+      drug.stock -= item.quantity;
+      await drug.save();
+    }
 
-      
-      
-      await purchase.populate("user", "full_name email role");
-      await purchase.populate("drug", "name price");
+   const order = await models.Order.create({
+  patient: patient._id,
+  dispensedBy: user.id,
+  items: orderItems,
+  totalAmount,
+});
 
-      return purchase;
-    },
+   return await models.Order.findById(order._id)
+  .populate("patient")
+  .populate("dispensedBy")
+  .populate("items.drug");
+},
 
 
     createAppointment: async (_, { input }, { user }) => {
@@ -533,7 +755,288 @@ consultantAppointments: async (_, __, { user }) => {
   await appointment.populate("consultant", "full_name email");
 
   return appointment;
-}
+},
+startVideoConsultation: async (
+  _,
+  { appointmentId },
+  { user }
+) => {
+  try {
+    console.log("USER:", user);
+    console.log("APPOINTMENT ID:", appointmentId);
+
+    const appointment = await Appointment.findById(
+      appointmentId
+    );
+
+    console.log("FOUND APPOINTMENT:", appointment);
+
+    if (!appointment) {
+      throw new Error("Appointment not found");
+    }
+
+    if (!appointment.consultant) {
+      throw new Error(
+        "No consultant assigned to appointment"
+      );
+    }
+
+    console.log(
+      "CONSULTANT:",
+      appointment.consultant.toString()
+    );
+
+    console.log("USER ID:", user.id);
+
+    const roomId = uuidv4();
+
+    appointment.meetingLink =
+      `https://meet.jit.si/${roomId}`;
+
+    appointment.meetingStatus = "ACTIVE";
+
+    await appointment.save();
+
+    return appointment;
+
+  } catch (err) {
+    console.error(err);
+    throw err;
+  }
+},
+
+endVideoConsultation: async (
+  _,
+  { appointmentId },
+  { user }
+) => {
+
+  requireRole(user, ["CONSULTANT"]);
+
+  const appointment =
+    await Appointment.findById(
+      appointmentId
+    );
+
+  if (!appointment) {
+    throw new Error(
+      "Appointment not found"
+    );
+  }
+
+  appointment.meetingStatus =
+    "ENDED";
+
+  await appointment.save();
+
+  return appointment;
+},
+createFreelancerProfile: async (
+  _,
+  { input },
+  { user }
+) => {
+  if (!user) {
+    throw new Error("Login required");
+  }
+
+  return await Freelancer.create({
+    ...input,
+    user: user.id,
+  });
+},
+bookFreelancer: async (
+  _,
+  { input },
+  { user }
+) => {
+  if (!user) {
+    throw new Error("Login required");
+  }
+
+  return await FreelanceBooking.create({
+    patient: user.id,
+    freelancer: input.freelancerId,
+    service: input.service,
+    date: input.date,
+  });
+},
+
+createFreelanceJob: async (
+  _,
+  { input },
+  { user }
+) => {
+  requireRole(user, ["ADMIN"]);
+
+  return await FreelanceJob.create({
+    ...input,
+    employer: user.id,
+    status: "OPEN"
+  });
+},
+
+applyForFreelanceJob: async (
+  _,
+  { input },
+  { user }
+) => {
+  if (!user) {
+    throw new Error("Login required");
+  }
+
+  const job = await FreelanceJob.findById(input.jobId);
+  if (!job) {
+    throw new Error("Job not found");
+  }
+
+  const existing = await JobApplication.findOne({
+    freelancer: user.id,
+    job: input.jobId
+  });
+  if (existing) {
+    throw new Error("You have already applied for this job");
+  }
+
+  const application = await JobApplication.create({
+    freelancer: user.id,
+    job: input.jobId,
+    status: "PENDING"
+  });
+
+  return await application.populate([
+    { path: "freelancer", select: "full_name email role" },
+    { path: "job" }
+  ]);
+},
+
+createOutpatientRecord: async (
+  _,
+  { input },
+  { user }
+) => {
+  requireRole(user, ["CONSULTANT", "ADMIN"]);
+
+  const { patientId, temp, bp, weight, pulse, notes, diagnosis, prescriptions } = input;
+
+  const patient = await User.findOne({ _id: patientId, role: "PATIENT" });
+  if (!patient) {
+    throw new Error("Patient not found");
+  }
+
+  const record = await OutpatientRecord.create({
+    patient: patient._id,
+    consultant: user.id,
+    temp,
+    bp,
+    weight,
+    pulse,
+    notes,
+    diagnosis,
+    prescriptions: (prescriptions || []).map((p) => ({
+      drug: p.drugId,
+      dosage: p.dosage,
+      duration: p.duration
+    })),
+    status: "COMPLETED"
+  });
+
+  await record.populate([
+    { path: "patient", select: "full_name email" },
+    { path: "consultant", select: "full_name email" },
+    { path: "prescriptions.drug" }
+  ]);
+
+  return {
+    ...record.toObject(),
+    id: record._id.toString(),
+    message: "Outpatient record saved successfully"
+  };
+},
+
+createLabTest: async (_, { input }, { user }) => {
+  requireRole(user, ["LAB", "ADMIN"]);
+
+  return await LabTest.create({
+    ...input,
+    createdBy: user.id
+  });
+},
+
+orderLabTest: async (_, { input }, { user }) => {
+  requireRole(user, ["CONSULTANT", "ADMIN"]);
+
+  const { patientId, testName, notes } = input;
+
+  const patient = await User.findOne({ _id: patientId, role: "PATIENT" });
+  if (!patient) {
+    throw new Error("Patient not found");
+  }
+
+  const labOrder = await LabOrder.create({
+    patient: patient._id,
+    orderedBy: user.id,
+    testName,
+    notes,
+    status: "PENDING"
+  });
+
+  return await labOrder.populate([
+    { path: "patient", select: "full_name email" },
+    { path: "orderedBy", select: "full_name email role" }
+  ]);
+},
+
+startLabOrder: async (_, { labOrderId }, { user }) => {
+  requireRole(user, ["LAB"]);
+
+  const labOrder = await LabOrder.findById(labOrderId);
+  if (!labOrder) {
+    throw new Error("Lab order not found");
+  }
+
+  if (labOrder.status !== "PENDING") {
+    throw new Error("Only pending lab orders can be started");
+  }
+
+  labOrder.status = "IN_PROGRESS";
+  labOrder.processedBy = user.id;
+  await labOrder.save();
+
+  return await labOrder.populate([
+    { path: "patient", select: "full_name email" },
+    { path: "orderedBy", select: "full_name email role" },
+    { path: "processedBy", select: "full_name email" }
+  ]);
+},
+
+submitLabResult: async (_, { input }, { user }) => {
+  requireRole(user, ["LAB"]);
+
+  const { labOrderId, result, resultNotes } = input;
+
+  const labOrder = await LabOrder.findById(labOrderId);
+  if (!labOrder) {
+    throw new Error("Lab order not found");
+  }
+
+  if (labOrder.status === "COMPLETED") {
+    throw new Error("This lab order has already been completed");
+  }
+
+  labOrder.status = "COMPLETED";
+  labOrder.result = result;
+  labOrder.resultNotes = resultNotes;
+  labOrder.processedBy = user.id;
+  labOrder.completedAt = new Date();
+  await labOrder.save();
+
+  return await labOrder.populate([
+    { path: "patient", select: "full_name email" },
+    { path: "orderedBy", select: "full_name email role" },
+    { path: "processedBy", select: "full_name email" }
+  ]);
+},
 
   }
 

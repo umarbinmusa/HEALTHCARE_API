@@ -26,7 +26,11 @@ const drugSchema = new Schema(
     createdBy: {
       type: Schema.Types.ObjectId,
       ref: "User",
-    }
+    },
+     reorderLevel: {
+      type: Number,
+      default: 10,
+    },
   },
   { timestamps: true }
 );

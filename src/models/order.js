@@ -1,30 +1,58 @@
 import mongoose from "mongoose";
 
-const orderSchema = new mongoose.Schema({
-    customer: {
-        type: String,
-        enum: ['Healthy Living Store','Fresh mart','Green valley']
+const { Schema, model } = mongoose;
+
+const orderItemSchema = new Schema({
+  drug: {
+    type: Schema.Types.ObjectId,
+    ref: "Drug",
+    required: true,
+  },
+
+  quantity: {
+    type: Number,
+    required: true,
+  },
+
+  unitPrice: {
+    type: Number,
+    required: true,
+  },
+
+  totalPrice: {
+    type: Number,
+    required: true,
+  },
+});
+
+const orderSchema = new Schema(
+  {
+    patient: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
     },
-    order_date: {
-        type: Date
+
+    dispensedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
     },
-    delivery_date: {
-        type: Date
+
+    items: [orderItemSchema],
+
+    totalAmount: {
+      type: Number,
+      default: 0,
     },
-    product: {
-        type: String,
-        enum: ['pure water 500ml(20packs)','pure water 75cl(12packs)','pure water 1l(12packs)','pure water 1.5l(6packs)','pure water 5l(individual)']
+
+    status: {
+      type: String,
+      default: "COMPLETED",
     },
-    quantity: {
-        type: String
-    },
-    unit: {
-        type: String
-    },
-    total: {
-        type: String
-    },
-    note: {
-        type: String
-    }
-}); export default mongoose.model("Order", orderSchema);
+  },
+  {
+    timestamps: true,
+  }
+);
+
+export default model("Order", orderSchema);
